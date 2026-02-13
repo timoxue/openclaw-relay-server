@@ -36,10 +36,26 @@ nano .env  # 编辑配置
 
 **必须配置的变量：**
 ```env
+# 基础配置
+NODE_ENV=production
 JWT_SECRET=<生成一个强密码>
+
+# 飞书配置
 FEISHU_APP_ID=<你的飞书应用ID>
 FEISHU_APP_SECRET=<你的飞书应用密钥>
-ANTHROPIC_API_KEY=<你的API密钥>
+
+# LLM 配置 (默认使用智谱 AI)
+LLM_PROVIDER=zhipu
+LLM_API_KEY=<你的智谱API密钥>
+LLM_MODEL=glm-4.7
+LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
+```
+
+**可选 - 使用 Anthropic:**
+```env
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=<你的Anthropic密钥>
+ANTHROPIC_MODEL=anthropic/claude-opus-4-5
 ```
 
 ### 3. 启动服务
