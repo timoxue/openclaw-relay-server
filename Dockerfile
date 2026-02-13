@@ -20,7 +20,7 @@ RUN apk add --no-cache sqlite
 
 # 复制 package 文件并安装生产依赖
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm install --omit=dev
 
 # 从构建阶段复制编译后的文件
 COPY --from=builder /app/dist ./dist
