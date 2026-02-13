@@ -281,11 +281,32 @@ router.get('/auth/qrcode', async (req: Request, res: Response) => {
 
     function copyToken() {
       const token = tokenValue.textContent;
-      navigator.clipboard.writeText(token).then(() => {
+      // Try modern clipboard API first, fallback to execCommand
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(token).then(() => {
+          alert('Token 已复制！');
+        }).catch(() => {
+          fallbackCopyToken(token);
+        });
+      } else {
+        fallbackCopyToken(token);
+      }
+    }
+
+    function fallbackCopyToken(token) {
+      const textArea = document.createElement('textarea');
+      textArea.value = token;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
         alert('Token 已复制！');
-      }).catch(() => {
+      } catch (err) {
         alert('复制失败，请手动复制');
-      });
+      }
+      document.body.removeChild(textArea);
     }
 
     // Start polling
@@ -498,11 +519,32 @@ router.get('/oauth/callback', async (req: Request, res: Response) => {
   <script>
     function copyToken() {
       const token = document.getElementById('tokenValue').textContent;
-      navigator.clipboard.writeText(token).then(() => {
+      // Try modern clipboard API first, fallback to execCommand
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(token).then(() => {
+          alert('Token 已复制！');
+        }).catch(() => {
+          fallbackCopyToken(token);
+        });
+      } else {
+        fallbackCopyToken(token);
+      }
+    }
+
+    function fallbackCopyToken(token) {
+      const textArea = document.createElement('textarea');
+      textArea.value = token;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
         alert('Token 已复制！');
-      }).catch(() => {
+      } catch (err) {
         alert('复制失败，请手动复制');
-      });
+      }
+      document.body.removeChild(textArea);
     }
   </script>
 </body>
@@ -557,12 +599,20 @@ async function completeOAuthFlow(code: string): Promise<{ token: string; userId:
     },
   });
 
+  console.log('User info response:', JSON.stringify(userInfoResponse.data));
+
   if (userInfoResponse.data.code !== 0) {
     throw new Error(`Failed to get user info: ${JSON.stringify(userInfoResponse.data)}`);
   }
 
-  const userId = userInfoResponse.data.data.user.user_id;
-  const name = userInfoResponse.data.data.user.name;
+  // Handle different response structures
+  const userData = userInfoResponse.data.data;
+  const userId = userData?.user?.user_id || userData?.user_id;
+  const name = userData?.user?.name || userData?.name;
+
+  if (!userId) {
+    throw new Error(`Failed to extract user_id from response: ${JSON.stringify(userInfoResponse.data)}`);
+  }
 
   // Generate JWT token
   const jwt = require('jsonwebtoken');
