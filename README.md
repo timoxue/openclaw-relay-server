@@ -42,8 +42,8 @@ docker-compose down
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| PORT | API 端口 | 3000 |
-| WS_PORT | WebSocket 端口 | 3001 |
+| PORT | API 端口 | 5178 |
+| WS_PORT | WebSocket 端口 | 5179 |
 | DATABASE_PATH | 数据库路径 | ./database/openclaw_relay.db |
 | JWT_SECRET | JWT 密钥 | - |
 | JWT_EXPIRES_IN | Token 有效期 | 30d |

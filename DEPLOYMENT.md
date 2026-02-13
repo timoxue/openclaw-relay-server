@@ -68,7 +68,7 @@ docker-compose up -d
 docker-compose logs -f
 
 # 检查服务状态
-curl http://localhost:3000/health
+curl http://localhost:5178/health
 ```
 
 ### 4. 配置防火墙
@@ -76,8 +76,8 @@ curl http://localhost:3000/health
 ```bash
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow 3000/tcp  # 如果不使用 nginx
-sudo ufw allow 3001/tcp  # 如果不使用 nginx
+sudo ufw allow 5178/tcp  # 如果不使用 nginx
+sudo ufw allow 5179/tcp  # 如果不使用 nginx
 sudo ufw enable
 ```
 

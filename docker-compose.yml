@@ -5,23 +5,26 @@ services:
     build: .
     container_name: openclaw-relay
     ports:
-      - "3000:3000"
-      - "3001:3001"
+      - "5178:5178"
+      - "5179:5179"
     environment:
       - NODE_ENV=production
-      - PORT=3000
-      - WS_PORT=3001
+      - PORT=5178
+      - WS_PORT=5179
       - DATABASE_PATH=/app/data/openclaw_relay.db
       - JWT_SECRET=${JWT_SECRET}
       - JWT_EXPIRES_IN=30d
       - FEISHU_APP_ID=${FEISHU_APP_ID}
       - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-zhipu}
+      - LLM_MODEL=${LLM_MODEL:-glm-4.7}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4/}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5178/health"]
       interval: 30s
       timeout: 10s
       retries: 3
