@@ -16,10 +16,12 @@ services:
       - JWT_EXPIRES_IN=30d
       - FEISHU_APP_ID=${FEISHU_APP_ID}
       - FEISHU_APP_SECRET=${FEISHU_APP_SECRET}
+      - FEISHU_ENCRYPT_KEY=${FEISHU_ENCRYPT_KEY}
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_PROVIDER=${LLM_PROVIDER:-zhipu}
       - LLM_MODEL=${LLM_MODEL:-glm-4.7}
       - LLM_BASE_URL=${LLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4/}
+      - SERVER_BASE_URL=${SERVER_BASE_URL:-http://localhost:5178}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

@@ -24,12 +24,13 @@ router.get('/auth/qrcode', async (req: Request, res: Response) => {
     // Generate the redirect URI
     const redirectUri = `${SERVER_BASE_URL}/oauth/callback`;
 
-    // Generate QR login URL for Feishu QR SDK (NOT encoded here, SDK will encode it)
-    const goto = `https://open.feishu.cn/open-apis/authen/v1/oidc/authorize?` +
-      `app_id=${FEISHU_APP_ID}&` +
+    // Generate QR login URL for Feishu QR SDK
+    // Using passport.feishu.cn for QR login
+    const goto = `https://passport.feishu.cn/suite/passport/oauth/authorize?` +
+      `client_id=${FEISHU_APP_ID}&` +
       `redirect_uri=${encodeURIComponent(redirectUri)}&` +
-      `state=${sessionId}&` +
-      `scope=openid`;
+      `response_type=code&` +
+      `state=${sessionId}`;
 
     // Render HTML page with Feishu QR SDK
     res.send(`
@@ -188,33 +189,53 @@ router.get('/auth/qrcode', async (req: Request, res: Response) => {
   </div>
 
   <!-- Feishu QR SDK -->
-  <script src="https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/passport/qrcode/LarkSSOSDKWebQRCode-1.0.3.js"></script>
+  <script src="https://sf3-cn.feishucdn.com/obj/static/lark/passport/qrcode/LarkSSOSDKWebQRCode-1.0.1.js"></script>
   <script>
     const sessionId = '${sessionId}';
     const statusEl = document.getElementById('status');
     const tokenDisplay = document.getElementById('tokenDisplay');
     const tokenValue = document.getElementById('tokenValue');
+    const goto = ${JSON.stringify(goto)};
 
     // Wait for SDK to load
     window.addEventListener('load', function() {
+      // Clear container before creating new QR code
+      const loginContainer = document.getElementById('login_container');
+      loginContainer.innerHTML = '';
+
       // Initialize Feishu QR Login SDK
       var QRLoginObj = QRLogin({
         id: "login_container",
-        goto: ${JSON.stringify(goto)},
+        goto: goto,
         width: "280",
         height: "280",
         style: "width: 280px; height: 280px;",
         onSuccess: function(res) {
-          // Login success - the callback will redirect to /oauth/callback
           console.log('QR login success:', res);
         },
         onError: function(err) {
-          // Login error
           console.error('QR login error:', err);
           statusEl.textContent = '登录失败: ' + (err.message || '未知错误');
           statusEl.className = 'status expired';
         }
       });
+
+      // Handle message from Feishu QR SDK
+      var handleMessage = function(event) {
+        var origin = event.origin;
+        if (QRLoginObj.matchOrigin(origin)) {
+          var loginTmpCode = event.data;
+          console.log('Received tmp_code:', loginTmpCode);
+          // Redirect to authorization page with tmp_code
+          window.location.href = goto + '&tmp_code=' + loginTmpCode;
+        }
+      };
+
+      if (typeof window.addEventListener != "undefined") {
+        window.addEventListener("message", handleMessage, false);
+      } else if (typeof window.attachEvent != "undefined") {
+        window.attachEvent("onmessage", handleMessage);
+      }
     });
 
     // Handle QR login success
@@ -500,21 +521,36 @@ router.get('/oauth/callback', async (req: Request, res: Response) => {
 async function completeOAuthFlow(code: string): Promise<{ token: string; userId: string; name: string }> {
   const axios = require('axios');
 
-  // Exchange authorization code for user access token
-  const tokenResponse = await axios.post('https://open.feishu.cn/open-apis/authen/v1/oidc/access_token', {
+  // Step 1: Get app_access_token
+  const appTokenResponse = await axios.post('https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal', {
     app_id: FEISHU_APP_ID,
     app_secret: process.env.FEISHU_APP_SECRET,
+  });
+
+  if (appTokenResponse.data.code !== 0) {
+    throw new Error(`Failed to get app access token: ${JSON.stringify(appTokenResponse.data)}`);
+  }
+
+  const appAccessToken = appTokenResponse.data.app_access_token;
+
+  // Step 2: Exchange authorization code for user access token using app_access_token
+  const tokenResponse = await axios.post('https://open.feishu.cn/open-apis/authen/v1/oidc/access_token', {
     grant_type: 'authorization_code',
+    client_id: FEISHU_APP_ID,
     code,
+  }, {
+    headers: {
+      'Authorization': `Bearer ${appAccessToken}`,
+    },
   });
 
   if (tokenResponse.data.code !== 0) {
     throw new Error(`Failed to get user access token: ${JSON.stringify(tokenResponse.data)}`);
   }
 
-  const userAccessToken = tokenResponse.data.user_access_token;
+  const userAccessToken = tokenResponse.data.data.access_token;
 
-  // Get user info
+  // Step 3: Get user info
   const userInfoResponse = await axios.get('https://open.feishu.cn/open-apis/authen/v1/user_info', {
     headers: {
       Authorization: `Bearer ${userAccessToken}`,
