@@ -1,3 +1,8 @@
+export interface TokenPayload {
+  userId: number;
+  feishuUserId: string;
+}
+
 export interface User {
   id: number;
   feishu_user_id: string;
