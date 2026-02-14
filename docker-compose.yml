@@ -7,10 +7,15 @@ services:
     ports:
       - "5178:5178"
       - "5179:5179"
+      - "5189:5189"
+      - "5190:5190"
     environment:
       - NODE_ENV=production
       - PORT=5178
       - WS_PORT=5179
+      - FEISHU_WS_PORT=5189
+      - OPENCLAW_WS_PORT=5190
+      - USE_DUAL_WS=true
       - DATABASE_PATH=/app/data/openclaw_relay.db
       - JWT_SECRET=${JWT_SECRET}
       - JWT_EXPIRES_IN=30d
