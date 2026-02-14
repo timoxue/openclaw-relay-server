@@ -44,7 +44,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sessions_ws_id ON sessions(ws_id);
 `);
 
+// 暴露数据库实例
+export const getDb = () => db;
+
 export const database = {
+  getDb: () => db,
   // 用户操作
   createUser: (feishuUserId: string, token: string, expiresAt: Date): User => {
     const stmt = db.prepare(`
@@ -61,7 +65,7 @@ export const database = {
   },
 
   getUserByToken: (token: string): User | undefined => {
-    const stmt = db.prepare('SELECT * FROM users WHERE token = ? AND token_expires_at > datetime("now")');
+    const stmt = db.prepare("SELECT * FROM users WHERE token = ? AND token_expires_at > datetime('now', 'localtime')");
     return stmt.get(token) as User | undefined;
   },
 
@@ -79,13 +83,13 @@ export const database = {
 
   setWsConnected: (userId: number, connected: boolean): void => {
     const stmt = db.prepare(`
-      UPDATE users SET ws_connected = ?, last_seen = datetime("now") WHERE id = ?
+      UPDATE users SET ws_connected = ?, last_seen = datetime('now') WHERE id = ?
     `);
     stmt.run(connected ? 1 : 0, userId);
   },
 
   updateLastSeen: (userId: number): void => {
-    const stmt = db.prepare('UPDATE users SET last_seen = datetime("now") WHERE id = ?');
+    const stmt = db.prepare("UPDATE users SET last_seen = datetime('now') WHERE id = ?");
     stmt.run(userId);
   },
 
