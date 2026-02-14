@@ -8,6 +8,9 @@ export interface User {
   feishu_user_id: string;
   token: string;
   token_expires_at: Date;
+  feishu_access_token: string;
+  feishu_refresh_token: string;
+  feishu_token_expires_at: Date;
   ws_connected: boolean;
   last_seen: Date;
   created_at: Date;

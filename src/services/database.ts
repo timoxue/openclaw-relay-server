@@ -13,7 +13,7 @@ const db = new Database(process.env.DATABASE_PATH || './database/openclaw_relay.
 // 启用外键约束
 db.pragma('foreign_keys = ON');
 
-// 创建用户表
+// 创建用户表（基础结构）
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,6 +25,25 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
+
+// 数据库迁移：添加飞书 token 列（如果不存在）
+try {
+  db.exec('ALTER TABLE users ADD COLUMN feishu_access_token TEXT');
+} catch (e) {
+  // 列已存在，忽略错误
+}
+
+try {
+  db.exec('ALTER TABLE users ADD COLUMN feishu_refresh_token TEXT');
+} catch (e) {
+  // 列已存在，忽略错误
+}
+
+try {
+  db.exec("ALTER TABLE users ADD COLUMN feishu_token_expires_at DATETIME");
+} catch (e) {
+  // 列已存在，忽略错误
+}
 
 // 创建会话表
 db.exec(`
@@ -59,6 +78,32 @@ export const database = {
     return database.getUserById(result.lastInsertRowid as number)!;
   },
 
+  createUserWithFeishuTokens: (
+    feishuUserId: string,
+    token: string,
+    tokenExpiresAt: Date,
+    feishuAccessToken: string,
+    feishuRefreshToken: string,
+    feishuTokenExpiresAt: Date
+  ): User => {
+    const stmt = db.prepare(`
+      INSERT INTO users (
+        feishu_user_id, token, token_expires_at,
+        feishu_access_token, feishu_refresh_token, feishu_token_expires_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      feishuUserId,
+      token,
+      tokenExpiresAt.toISOString(),
+      feishuAccessToken,
+      feishuRefreshToken,
+      feishuTokenExpiresAt.toISOString()
+    );
+    return database.getUserById(result.lastInsertRowid as number)!;
+  },
+
   getUserByFeishuId: (feishuUserId: string): User | undefined => {
     const stmt = db.prepare('SELECT * FROM users WHERE feishu_user_id = ?');
     return stmt.get(feishuUserId) as User | undefined;
@@ -79,6 +124,30 @@ export const database = {
       UPDATE users SET token = ?, token_expires_at = ? WHERE id = ?
     `);
     stmt.run(token, expiresAt.toISOString(), id);
+  },
+
+  updateUserAndFeishuTokens: (
+    id: number,
+    token: string,
+    tokenExpiresAt: Date,
+    feishuAccessToken: string,
+    feishuRefreshToken: string,
+    feishuTokenExpiresAt: Date
+  ): void => {
+    const stmt = db.prepare(`
+      UPDATE users
+      SET token = ?, token_expires_at = ?,
+          feishu_access_token = ?, feishu_refresh_token = ?, feishu_token_expires_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(
+      token,
+      tokenExpiresAt.toISOString(),
+      feishuAccessToken,
+      feishuRefreshToken,
+      feishuTokenExpiresAt.toISOString(),
+      id
+    );
   },
 
   setWsConnected: (userId: number, connected: boolean): void => {

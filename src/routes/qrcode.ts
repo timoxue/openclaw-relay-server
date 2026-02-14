@@ -591,6 +591,11 @@ async function completeOAuthFlow(code: string): Promise<{ token: string; userId:
   }
 
   const userAccessToken = tokenResponse.data.data.access_token;
+  const refreshToken = tokenResponse.data.data.refresh_token;
+  const expiresIn = tokenResponse.data.data.expires_in; // seconds
+
+  // Calculate token expiration time
+  const feishuTokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
 
   // Step 3: Get user info
   const userInfoResponse = await axios.get('https://open.feishu.cn/open-apis/authen/v1/user_info', {
@@ -631,11 +636,11 @@ async function completeOAuthFlow(code: string): Promise<{ token: string; userId:
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
 
   if (user) {
-    // Update existing user's token
-    database.updateUserToken(user.id, token, expiresAt);
+    // Update existing user's token and Feishu tokens
+    database.updateUserAndFeishuTokens(user.id, token, expiresAt, userAccessToken, refreshToken, feishuTokenExpiresAt);
   } else {
-    // Create new user
-    user = database.createUser(userId, token, expiresAt);
+    // Create new user with Feishu tokens
+    user = database.createUserWithFeishuTokens(userId, token, expiresAt, userAccessToken, refreshToken, feishuTokenExpiresAt);
   }
 
   return {
