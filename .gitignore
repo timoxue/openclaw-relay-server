@@ -1,9 +1,45 @@
+# Dependencies
 node_modules/
+package-lock.json
+
+# Build outputs
 dist/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database files
 database/*.db
 database/*.db-shm
 database/*.db-wal
-.env
+
+# Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test coverage
+coverage/
+*.lcov
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+*.sublime-*
+
+# Temporary files
+*.tmp
+*.temp
 certs/
 data/
+
+# Test files
+test-dual-ws.js
