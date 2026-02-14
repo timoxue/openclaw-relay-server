@@ -619,33 +619,32 @@ async function completeOAuthFlow(code: string): Promise<{ token: string; userId:
     throw new Error(`Failed to extract user_id from response: ${JSON.stringify(userInfoResponse.data)}`);
   }
 
-  // Generate JWT token
-  const jwt = require('jsonwebtoken');
-  const secret = process.env.JWT_SECRET || 'openclaw-secret-key';
-  const token = jwt.sign(
-    {
-      userId,
-      type: 'relay_token',
-    },
-    secret,
-    { expiresIn: '30d' }
-  );
-
-  // Update or create user in database
-  let user = database.getUserByFeishuId(userId);
+  // First create or get user (need database user.id for token payload)
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+  let user = database.getUserByFeishuId(userId);
 
   if (user) {
-    // Update existing user's token and Feishu tokens
-    database.updateUserAndFeishuTokens(user.id, token, expiresAt, userAccessToken, refreshToken, feishuTokenExpiresAt);
+    // Update existing user's Feishu tokens
+    database.updateUserAndFeishuTokens(user.id, user.token, expiresAt, userAccessToken, refreshToken, feishuTokenExpiresAt);
   } else {
-    // Create new user with Feishu tokens
-    user = database.createUserWithFeishuTokens(userId, token, expiresAt, userAccessToken, refreshToken, feishuTokenExpiresAt);
+    // Create new user with Feishu tokens using a temporary token
+    const tempToken = 'temp_' + Date.now();
+    user = database.createUserWithFeishuTokens(userId, tempToken, expiresAt, userAccessToken, refreshToken, feishuTokenExpiresAt);
   }
+
+  // Generate proper JWT token using tokenService for consistency
+  const { tokenService } = require('../services/token');
+  const token = tokenService.generateToken({
+    userId: user.id,           // ← 数据库用户ID（数字）
+    feishuUserId: user.feishu_user_id,  // ← 飞书用户ID（字符串）
+  });
+
+  // Update user with the final token
+  database.updateUserToken(user.id, token, expiresAt);
 
   return {
     token,
-    userId,
+    userId,   // 飞书用户ID（用于显示）
     name,
   };
 }
