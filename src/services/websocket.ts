@@ -122,11 +122,21 @@ export class WebSocketService {
     if (!client.userId) return;
 
     try {
-      // 根据内容类型发送
+      // 提取文本内容
+      let textToSend = '';
       if (typeof content === 'string') {
-        await feishuAPI.sendTextMessage(to, content);
+        textToSend = content;
+      } else if (typeof content === 'object' && content.text) {
+        textToSend = content.text;
+      }
+
+      if (textToSend) {
+        await feishuAPI.sendTextMessage(to, textToSend);
+        console.log(`[Feishu] Message sent to ${to}`);
       } else {
-        await feishuAPI.sendPostMessage(to, content);
+        console.error(`[Feishu] No text content to send:`, content);
+        this.sendError(client, 'No text content to send');
+        return;
       }
 
       // 更新最后活跃时间

@@ -56,11 +56,22 @@ db.exec(`
   )
 `);
 
+// 创建配置表
+db.exec(`
+  CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    expires_at DATETIME,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
 // 创建索引
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_feishu_id ON users(feishu_user_id);
   CREATE INDEX IF NOT EXISTS idx_users_token ON users(token);
   CREATE INDEX IF NOT EXISTS idx_sessions_ws_id ON sessions(ws_id);
+  CREATE INDEX IF NOT EXISTS idx_config_key ON config(key);
 `);
 
 // 暴露数据库实例
@@ -189,6 +200,48 @@ export const database = {
       WHERE s.ws_id = ?
     `);
     return stmt.get(wsId) as User | undefined;
+  },
+
+  // 配置操作 - 用于存储应用级别的token
+  getConfig: (key: string): string | undefined => {
+    const stmt = db.prepare(`
+      SELECT value FROM config
+      WHERE key = ?
+      AND (expires_at IS NULL OR expires_at > datetime('now', 'localtime'))
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `);
+    const result = stmt.get(key) as { value: string } | undefined;
+    return result?.value;
+  },
+
+  getConfigWithExpiry: (key: string): { value: string; expiresAt: number } | undefined => {
+    const stmt = db.prepare(`
+      SELECT value, expires_at FROM config
+      WHERE key = ?
+      AND (expires_at IS NULL OR expires_at > datetime('now', 'localtime'))
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `);
+    const result = stmt.get(key) as { value: string; expires_at: string | null } | undefined;
+    if (!result) return undefined;
+    return {
+      value: result.value,
+      expiresAt: result.expires_at ? new Date(result.expires_at).getTime() / 1000 : Infinity,
+    };
+  },
+
+  setConfig: (key: string, value: string, expiresAt?: Date): void => {
+    const stmt = db.prepare(`
+      INSERT OR REPLACE INTO config (key, value, expires_at, updated_at)
+      VALUES (?, ?, ?, datetime('now'))
+    `);
+    stmt.run(key, value, expiresAt ? expiresAt.toISOString() : null);
+  },
+
+  deleteConfig: (key: string): void => {
+    const stmt = db.prepare('DELETE FROM config WHERE key = ?');
+    stmt.run(key);
   },
 };
 

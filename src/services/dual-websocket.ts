@@ -418,12 +418,20 @@ export class DualWebSocketService {
     }
 
     try {
+      // 提取文本内容
+      let textToSend = '';
       if (typeof content === 'string') {
-        await feishuAPI.sendTextMessage(user.feishu_user_id, content);
-      } else {
-        await feishuAPI.sendPostMessage(user.feishu_user_id, content);
+        textToSend = content;
+      } else if (typeof content === 'object' && content.text) {
+        textToSend = content.text;
       }
-      console.log(`[Feishu] Message sent to ${user.feishu_user_id}`);
+
+      if (textToSend) {
+        await feishuAPI.sendTextMessage(user.feishu_user_id, textToSend);
+        console.log(`[Feishu] Message sent to ${user.feishu_user_id}`);
+      } else {
+        console.error(`[Feishu] No text content to send:`, content);
+      }
     } catch (error) {
       console.error('[Feishu] Failed to send message:', error);
     }
