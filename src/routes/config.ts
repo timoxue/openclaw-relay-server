@@ -3,6 +3,25 @@ import { authMiddleware, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
+// 获取飞书应用配置 (需要认证)
+router.get('/feishu', authMiddleware, (req: AuthRequest, res) => {
+  const appId = process.env.FEISHU_APP_ID || '';
+
+  if (!appId) {
+    return res.status(500).json({ error: 'Feishu app not configured' });
+  }
+
+  res.json({
+    success: true,
+    config: {
+      app_id: appId,
+      bot_name: 'OpenClaw 机器人',
+      server_url: process.env.SERVER_BASE_URL || 'http://localhost:5178',
+      // 注意：app_secret 不会返回给客户端，只在中继服务器使用
+    }
+  });
+});
+
 // 获取 LLM 配置 (需要认证)
 router.get('/', authMiddleware, (req: AuthRequest, res) => {
   const provider = process.env.LLM_PROVIDER || 'zhipu';

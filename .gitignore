@@ -6,3 +6,4 @@ database/*.db-wal
 .env
 *.log
 certs/
+data/
