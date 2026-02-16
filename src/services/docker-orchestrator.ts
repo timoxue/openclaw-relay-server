@@ -2,6 +2,9 @@ import Docker from 'dockerode';
 import { randomBytes } from 'crypto';
 import * as dockerConfig from '../../config/docker.json';
 import { DockerContainerInfo, IgniteOptions } from '../types';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('Docker');
 
 export class DockerOrchestrator {
   private docker: Docker;
@@ -21,7 +24,7 @@ export class DockerOrchestrator {
     const containerName = `${dockerConfig.containerPrefix}${userId}`;
     const hostStoragePath = storagePath || dockerConfig.storagePath.replace('{userId}', userId);
 
-    console.log(`[Docker] Igniting sandbox for user ${userId}...`);
+    logger.info(`Igniting sandbox for user ${userId}...`);
 
     // Create container
     const container = await this.docker.createContainer({
@@ -67,8 +70,8 @@ export class DockerOrchestrator {
 
     this.containers.set(userId, container);
 
-    console.log(`[Docker] Sandbox ignited: ${containerName} (port: ${hostPort})`);
-    console.log(`[Docker] Gateway token: ${gatewayToken}`);
+    logger.success(`Sandbox ignited: ${containerName} (port: ${hostPort})`);
+    logger.debug(`Gateway token: ${gatewayToken}`);
 
     return info;
   }
@@ -76,15 +79,15 @@ export class DockerOrchestrator {
   async stopSandbox(userId: string): Promise<void> {
     const container = this.containers.get(userId);
     if (!container) {
-      console.log(`[Docker] No container found for user ${userId}`);
+      logger.warning(`No container found for user ${userId}`);
       return;
     }
 
-    console.log(`[Docker] Stopping sandbox for user ${userId}...`);
+    logger.info(`Stopping sandbox for user ${userId}...`);
     await container.stop({ t: 10 });
     await container.remove();
     this.containers.delete(userId);
-    console.log(`[Docker] Sandbox stopped for ${userId}`);
+    logger.success(`Sandbox stopped for ${userId}`);
   }
 
   async getContainerStatus(userId: string): Promise<DockerContainerInfo | null> {
@@ -105,7 +108,7 @@ export class DockerOrchestrator {
         createdAt: new Date(info.Created)
       };
     } catch (error) {
-      console.error(`[Docker] Error getting container status:`, error);
+      logger.error(`Error getting container status: ${error}`);
       return null;
     }
   }
