@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package*.json ./
 COPY tsconfig.json ./
+COPY config ./config
 
 RUN npm ci
 
@@ -27,6 +28,7 @@ RUN npm install --omit=dev
 
 # 从构建阶段复制编译后的文件
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/config ./config
 
 # 创建数据库目录
 RUN mkdir -p /app/data

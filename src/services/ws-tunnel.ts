@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import * as net from 'net';
 
 /**
  * WebSocket Tunnel Service
@@ -17,6 +18,34 @@ export class WSTunnelService {
 
   // Map of user ID to Container WebSocket connection (Docker side)
   private containerConnections: Map<string, WebSocket> = new Map();
+
+  /**
+   * Check if a TCP port is reachable
+   */
+  private async isPortReachable(host: string, port: number, timeout: number = 2000): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+
+      socket.setTimeout(timeout);
+
+      socket.on('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+
+      socket.on('timeout', () => {
+        socket.destroy();
+        resolve(false);
+      });
+
+      socket.on('error', () => {
+        socket.destroy();
+        resolve(false);
+      });
+
+      socket.connect(port, host);
+    });
+  }
 
   /**
    * Register Node (PC) connection for a user
@@ -57,10 +86,10 @@ export class WSTunnelService {
   }
 
   /**
-   * Connect to Docker container WebSocket for a user
+   * Connect to Docker container WebSocket for a user with port check and retry logic
    *
    * @param userId - User identifier
-   * @param containerPort - Port of the Docker container
+   * @param containerPort - Port of Docker container (unused when connecting via container name)
    * @returns Promise that resolves when connection is established
    */
   async connectToContainer(userId: string, containerPort: number): Promise<void> {
@@ -71,36 +100,90 @@ export class WSTunnelService {
       existingConnection.close();
     }
 
-    // Create new WebSocket connection to container
-    const containerUrl = `ws://localhost:${containerPort}`;
-    console.log(`[WSTunnel] Connecting to container for user ${userId} at ${containerUrl}`);
+    // Container name format: openclaw-sandbox-{userId}
+    // Relay server is in the same Docker network (synapse-net), so we can connect via container name
+    const containerName = `openclaw-sandbox-${userId}`;
+    const containerUrl = `ws://${containerName}:18789`;
+    console.log(`[WSTunnel] Connecting to container ${containerName} for user ${userId} at ${containerUrl}`);
 
-    const containerWs = new WebSocket(containerUrl);
+    // Retry logic: check port first, then try WebSocket connection
+    const maxRetries = 15;
+    const retryDelay = 1000; // 1 second between checks
 
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      console.log(`[WSTunnel] Connection attempt ${attempt}/${maxRetries} for user ${userId}`);
+
+      // Step 1: Check if port is reachable
+      const portReachable = await this.isPortReachable(containerName, 18789, 1000);
+      console.log(`[WSTunnel] Port 18789 check for ${containerName}: ${portReachable ? 'REACHABLE' : 'NOT REACHABLE'}`);
+
+      if (!portReachable) {
+        if (attempt < maxRetries) {
+          console.log(`[WSTunnel] Port not reachable, retrying in ${retryDelay / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        } else {
+          throw new Error(`Port 18789 not reachable after ${maxRetries} attempts`);
+        }
+      }
+
+      // Step 2: Try WebSocket connection
+      try {
+        await this.tryConnect(userId, containerName, containerUrl);
+        console.log(`[WSTunnel] Successfully connected to container for user ${userId}`);
+        return;
+      } catch (error: any) {
+        console.log(`[WSTunnel] WebSocket connection attempt ${attempt} failed for user ${userId}: ${error.message}`);
+
+        if (attempt < maxRetries) {
+          console.log(`[WSTunnel] Retrying in ${retryDelay / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        } else {
+          console.error(`[WSTunnel] All connection attempts failed for user ${userId}`);
+          throw error;
+        }
+      }
+    }
+  }
+
+  /**
+   * Try to connect to container WebSocket
+   */
+  private tryConnect(userId: string, containerName: string, containerUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      const containerWs = new WebSocket(containerUrl);
+
+      // Set connection timeout
+      const timeout = setTimeout(() => {
+        containerWs.terminate();
+        reject(new Error('Connection timeout'));
+      }, 5000); // 5 second timeout
+
       // Handle connection open
       containerWs.on('open', () => {
+        clearTimeout(timeout);
         console.log(`[WSTunnel] Connected to container for user ${userId}`);
         this.containerConnections.set(userId, containerWs);
+
+        // Set up message handler for container connection
+        containerWs.on('message', (data: WebSocket.Data) => {
+          this.handleContainerMessage(userId, data);
+        });
+
+        // Handle container connection close
+        containerWs.on('close', () => {
+          console.log(`[WSTunnel] Container connection closed for user ${userId}`);
+          this.containerConnections.delete(userId);
+        });
+
         resolve();
       });
 
       // Handle connection error
-      containerWs.on('error', (error) => {
-        console.error(`[WSTunnel] Container connection error for user ${userId}:`, error);
-        this.containerConnections.delete(userId);
+      containerWs.on('error', (error: any) => {
+        clearTimeout(timeout);
+        containerWs.terminate();
         reject(error);
-      });
-
-      // Set up message handler for container connection
-      containerWs.on('message', (data: WebSocket.Data) => {
-        this.handleContainerMessage(userId, data);
-      });
-
-      // Handle container connection close
-      containerWs.on('close', () => {
-        console.log(`[WSTunnel] Container connection closed for user ${userId}`);
-        this.containerConnections.delete(userId);
       });
     });
   }
@@ -158,7 +241,6 @@ export class WSTunnelService {
    */
   disconnectContainer(userId: string): void {
     const containerWs = this.containerConnections.get(userId);
-
     if (containerWs && containerWs.readyState === WebSocket.OPEN) {
       console.log(`[WSTunnel] Disconnecting container for user ${userId}`);
       containerWs.close();
@@ -173,7 +255,6 @@ export class WSTunnelService {
    */
   disconnectNode(userId: string): void {
     const nodeWs = this.nodeConnections.get(userId);
-
     if (nodeWs && nodeWs.readyState === WebSocket.OPEN) {
       console.log(`[WSTunnel] Disconnecting Node for user ${userId}`);
       nodeWs.close();
@@ -235,6 +316,7 @@ export class WSTunnelService {
         nodeWs.close();
       }
     }
+
     this.nodeConnections.clear();
 
     // Close all container connections
@@ -244,8 +326,8 @@ export class WSTunnelService {
         containerWs.close();
       }
     }
-    this.containerConnections.clear();
 
+    this.containerConnections.clear();
     console.log('[WSTunnel] All connections closed');
   }
 }

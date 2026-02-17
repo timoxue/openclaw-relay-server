@@ -1,9 +1,10 @@
 {
   "network": "synapse-net",
-  "image": "openclaw/gateway:latest",
+  "image": "openclaw/gateway:local",
   "containerPrefix": "openclaw-sandbox-",
   "gatewayPort": 18789,
-  "storagePath": "/root/.openclaw/storage/{userId}",
+  "internalGatewayPort": 18789,
+  "storagePath": "/Users/timo/openclaw/sandboxes/{userId}/storage",
   "autoRemove": true,
   "environment": {
     "OPENCLAW_MODE": "relay",

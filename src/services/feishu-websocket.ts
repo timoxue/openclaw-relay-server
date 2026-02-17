@@ -22,7 +22,7 @@ export class FeishuWebSocketClient {
     this.wsClient = new lark.WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
-      loggerLevel: lark.LoggerLevel.info,
+      loggerLevel: lark.LoggerLevel.debug,
     });
   }
 
@@ -140,6 +140,8 @@ export class FeishuWebSocketClient {
             chat_id: event.message?.chat_id || '',
             content: event.message?.content || '',
             create_time: event.message?.create_time || '',
+            update_time: event.message?.update_time || '',
+            message_type: event.message?.message_type || '',
           },
         },
       };

@@ -4,6 +4,8 @@ services:
   relay-server:
     build: .
     container_name: openclaw-relay
+    networks:
+      - synapse-net
     ports:
       - "5178:5178"
       - "5179:5179"
@@ -55,3 +57,7 @@ services:
     restart: unless-stopped
     profiles:
       - with-nginx
+
+networks:
+  synapse-net:
+    external: true

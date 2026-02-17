@@ -70,6 +70,8 @@ export interface FeishuWSMessage {
     sender: {
       sender_id: {
         user_id: string;
+        open_id?: string;
+        union_id?: string;
       };
       sender_type: string;
     };
@@ -79,6 +81,8 @@ export interface FeishuWSMessage {
       chat_id: string;
       content: string;
       create_time: string;
+      update_time: string;
+      message_type: string;
     };
   };
 }

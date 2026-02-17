@@ -1,14 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { WebSocketService } from './services/websocket';
-import { DualWebSocketService } from './services/dual-websocket';
+import * as lark from '@larksuiteoapi/node-sdk';
 import { feishuOAuth } from './services/feishu-oauth';
 import { orchestrator } from './services/orchestrator';
-import { feishuWebSocket } from './services/feishu-websocket';
 import authRoutes from './routes/auth';
 import configRoutes from './routes/config';
-import feishuRoutes, { setWebSocketService, setDualWebSocketService } from './routes/feishu';
+import feishuRoutes from './routes/feishu';
 import qrcodeRoutes from './routes/qrcode';
 import orchestratorRoutes from './routes/orchestrator';
 
@@ -16,14 +14,38 @@ import orchestratorRoutes from './routes/orchestrator';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const WS_PORT = process.env.WS_PORT || 3001;
+const PORT = process.env.PORT || 5178;
 
-// 双 WebSocket 端口配置
-const FEISHU_WS_PORT = Number(process.env.FEISHU_WS_PORT || 5189);
-const OPENCLAW_WS_PORT = Number(process.env.OPENCLAW_WS_PORT || 5190);
+// Feishu configuration
+const appId = process.env.FEISHU_APP_ID || '';
+const appSecret = process.env.FEISHU_APP_SECRET || '';
+const encryptKey = process.env.FEISHU_ENCRYPT_KEY || '';
+const verificationToken = process.env.FEISHU_VERIFICATION_TOKEN || '';
 
-// 中间件
+console.log('[Server] Feishu configuration:');
+console.log(`[Server]   App ID: ${appId}`);
+console.log(`[Server]   App Secret: ${appSecret ? '***' : 'NOT SET'}`);
+console.log(`[Server]   Encrypt Key: ${encryptKey ? 'SET' : 'NOT SET (can be empty)'}`);
+console.log(`[Server]   Verification Token: ${verificationToken ? 'SET' : 'NOT SET'}`);
+
+// Create Feishu API client
+export const feishuApiClient = new lark.Client({
+  appId,
+  appSecret,
+  appType: lark.AppType.SelfBuild,
+});
+
+// Create Feishu WebSocket client
+export const feishuWSClient = new lark.WSClient({
+  appId,
+  appSecret,
+  loggerLevel: lark.LoggerLevel.debug,
+});
+
+// Feishu connection status
+let feishuConnected = false;
+
+// Middleware
 app.use(cors({
   origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
 }));
@@ -36,7 +58,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     services: {
       api: true,
-      websocket: true,
+      feishu: feishuConnected,
     },
   });
 });
@@ -46,28 +68,177 @@ app.use('/api/auth', authRoutes);
 app.use('/api/config', configRoutes);
 app.use('/api/feishu', feishuRoutes);
 app.use('/api/orchestrator', orchestratorRoutes);
-app.use('/', qrcodeRoutes); // QR code routes
+app.use('/', qrcodeRoutes);
 
 // 定期清理过期的 OAuth 会话
 setInterval(() => {
   feishuOAuth.cleanupExpiredSessions();
-}, 60 * 1000); // 每分钟清理一次
+}, 60 * 1000);
 
 // 初始化 orchestrator 和 Feishu WebSocket
 async function initializeOrchestrator() {
   try {
     console.log('[Server] Initializing orchestrator and Feishu WebSocket...');
 
-    // Start Feishu WebSocket connection
-    await feishuWebSocket.start();
+    // Create event dispatcher
+    const eventDispatcher = new lark.EventDispatcher({
+      encryptKey,
+      verificationToken,
+    }).register({
+      'im.message.receive_v1': async (data: any) => {
+        console.log('\n=== MESSAGE RECEIVED (im.message.receive_v1) ===');
+        console.log('Event:', JSON.stringify(data, null, 2));
+        console.log('=========================\n');
 
-    // Initialize orchestrator (this registers the message handler)
+        // Directly access user ID from raw data
+        const userId = data.sender?.sender_id?.user_id || '';
+
+        console.log(`[Server] Direct user ID access: ${userId}`);
+
+        // Create message object for orchestrator
+        // Note: Feishu SDK passes event data with flattened structure
+        const message = data.message || {};
+        const sender = data.sender || {};
+
+        const messageData = {
+          header: {
+            event_id: data.event_id || '',
+            event_type: data.event_type || '',
+            create_time: data.create_time || '',
+            token: data.token || '',
+            app_type: data.app_type || '',
+            tenant_key: data.tenant_key || '',
+          },
+          event: {
+            sender: {
+              sender_id: {
+                user_id: userId,
+                open_id: sender.sender_id?.open_id || '',
+                union_id: sender.sender_id?.union_id || '',
+              },
+              sender_type: sender.sender_type || '',
+            },
+            message: {
+              message_id: message.message_id || '',
+              chat_type: message.chat_type || '',
+              chat_id: message.chat_id || '',
+              content: message.content || '',
+              create_time: message.create_time || '',
+              update_time: message.update_time || '',
+              message_type: message.message_type || '',
+            },
+          },
+        };
+
+        // Pass to orchestrator
+        if (messageData) {
+          await orchestrator.handleFeishuMessage(messageData);
+        }
+      },
+      'application.bot.menu_v6': async (data: any) => {
+        console.log('\n=== MENU CLICK EVENT ===');
+        console.log('Event:', JSON.stringify(data, null, 2));
+        console.log('=========================\n');
+        // Handle menu/button clicks if needed
+      },
+    });
+
+    // Start WebSocket connection
+    await feishuWSClient.start({
+      eventDispatcher: eventDispatcher,
+    });
+
+    console.log('[Server] Feishu WebSocket connected successfully');
+    feishuConnected = true;
+
+    // Initialize orchestrator
     await orchestrator.initialize();
 
-    console.log('[Server] Orchestrator and Feishu WebSocket initialized successfully');
+    console.log('[Server] Orchestrator initialized successfully');
   } catch (error) {
     console.error('[Server] Failed to initialize orchestrator:', error);
     throw error;
+  }
+}
+
+// Parse Feishu message event
+function parseFeishuMessage(data: any): any {
+  try {
+    // Debug: log raw data structure
+    console.log('[Server] Raw event data:', JSON.stringify(data, null, 2));
+
+    // Feishu SDK event data structure
+    const header = data.header || {};
+    const event = data.event || {};
+    const sender = event.sender || {};
+    const sender_id = sender.sender_id || {};
+    const message = event.message || {};
+
+    console.log('[Server] sender object:', JSON.stringify(sender, null, 2));
+    console.log('[Server] sender_id object:', JSON.stringify(sender_id, null, 2));
+
+    const userId = sender_id.user_id || sender_id.open_id || '';
+    console.log(`[Server] Parsed user ID: ${userId}`);
+
+    return {
+      header: {
+        event_id: header.event_id || '',
+        event_type: header.event_type || '',
+        create_time: header.create_time || '',
+        token: header.token || '',
+        app_type: header.app_type || '',
+        tenant_key: header.tenant_key || '',
+      },
+      event: {
+        sender: {
+          sender_id: {
+            user_id: userId,
+            open_id: sender_id.open_id || '',
+            union_id: sender_id.union_id || '',
+          },
+          sender_type: sender.sender_type || '',
+        },
+        message: {
+          message_id: message.message_id || '',
+          chat_type: message.chat_type || '',
+          chat_id: message.chat_id || '',
+          content: message.content || '',
+          create_time: message.create_time || '',
+        },
+      },
+    };
+  } catch (error) {
+    console.error('[Server] Failed to parse message:', error);
+    return null;
+  }
+}
+
+// Send text message to Feishu user
+export async function sendFeishuMessage(userId: string, text: string): Promise<boolean> {
+  try {
+    console.log(`[Server] Sending text message to user ${userId}: ${text}`);
+
+    const response = await feishuApiClient.im.message.create({
+      params: {
+        receive_id_type: 'user_id',
+      },
+      data: {
+        receive_id: userId,
+        msg_type: 'text',
+        content: JSON.stringify({ text }),
+      },
+    });
+
+    if (response.code === 0) {
+      console.log('[Server] Message sent successfully');
+      return true;
+    } else {
+      console.error(`[Server] Failed to send message: code=${response.code}, msg=${response.msg}`);
+      return false;
+    }
+  } catch (error) {
+    console.error('[Server] Error sending message:', error);
+    return false;
   }
 }
 
@@ -83,30 +254,10 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 // 启动服务器
-// 使用环境变量 USE_DUAL_WS 来决定使用单 WebSocket 还是双 WebSocket
-const USE_DUAL_WS = process.env.USE_DUAL_WS === 'true';
-
-let wsService: WebSocketService | null = null;
-let dualWsService: DualWebSocketService | null = null;
-
-if (USE_DUAL_WS) {
-  // 使用双 WebSocket 服务
-  dualWsService = new DualWebSocketService(FEISHU_WS_PORT, OPENCLAW_WS_PORT);
-  setDualWebSocketService(dualWsService);
-  console.log(`[Dual WS] Feishu WS on port ${FEISHU_WS_PORT}, OpenClaw WS on port ${OPENCLAW_WS_PORT}`);
-} else {
-  // 使用单 WebSocket 服务（向后兼容）
-  wsService = new WebSocketService(Number(WS_PORT));
-  setWebSocketService(wsService);
-}
-
-// Start API server and initialize orchestrator
 app.listen(PORT, async () => {
   console.log(`API server running on port ${PORT}`);
-  console.log(`WebSocket server running on port ${WS_PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-  // Initialize orchestrator and Feishu WebSocket after server starts
   await initializeOrchestrator();
 });
 
@@ -116,16 +267,12 @@ const gracefulShutdown = async (signal: string) => {
 
   try {
     // Stop Feishu WebSocket
-    feishuWebSocket.stop(true);
+    feishuWSClient.close({ force: true });
     console.log('[Server] Feishu WebSocket stopped');
 
     // Shutdown orchestrator
     await orchestrator.shutdown();
     console.log('[Server] Orchestrator shut down');
-
-    // Close WebSocket services
-    if (wsService) wsService.close();
-    if (dualWsService) dualWsService.close();
 
     console.log('[Server] All services shut down successfully');
     process.exit(0);
