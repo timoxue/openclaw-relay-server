@@ -1,4 +1,4 @@
-# Ubuntu 部署指南
+# 部署指南
 
 ## 前置要求
 
@@ -23,8 +23,8 @@ sudo systemctl start docker
 ### 1. 克隆代码
 
 ```bash
-git clone <your-repo-url> openclaw-relay-server
-cd openclaw-relay-server
+git clone <your-repo-url> lingsynapse
+cd lingsynapse
 ```
 
 ### 2. 配置环境变量
@@ -38,17 +38,23 @@ nano .env  # 编辑配置
 ```env
 # 基础配置
 NODE_ENV=production
+PORT=5178
 JWT_SECRET=<生成一个强密码>
 
 # 飞书配置
 FEISHU_APP_ID=<你的飞书应用ID>
 FEISHU_APP_SECRET=<你的飞书应用密钥>
+FEISHU_ENCRYPT_KEY=<飞书加密密钥（可选）>
+FEISHU_VERIFICATION_TOKEN=<飞书验证令牌（可选）>
 
 # LLM 配置 (默认使用智谱 AI)
 LLM_PROVIDER=zhipu
 LLM_API_KEY=<你的智谱API密钥>
 LLM_MODEL=glm-4.7
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
+
+# Docker 配置
+DOCKER_NETWORK=synapse-net
 ```
 
 **可选 - 使用 Anthropic:**
@@ -76,8 +82,7 @@ curl http://localhost:5178/health
 ```bash
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow 5178/tcp  # 如果不使用 nginx
-sudo ufw allow 5179/tcp  # 如果不使用 nginx
+sudo ufw allow 5178/tcp  # HTTP API
 sudo ufw enable
 ```
 
@@ -95,20 +100,55 @@ ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
 ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
 ```
 
-### 6. 配置飞书机器人 Webhook
+### Nginx 配置示例
 
-1. 登录飞书开放平台
-2. 进入你的应用 -> 事件订阅
-3. 设置请求 URL: `https://your-domain.com/api/feishu/webhook`
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    return 301 https://$server_name$request_uri;
+}
 
-## 本地开发（Ubuntu）
+server {
+    listen 443 ssl http2;
+    server_name your-domain.com;
 
-如果需要在 Ubuntu 上本地开发：
+    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:5178;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+## 连接方式说明
+
+### 飞书连接
+
+本服务使用 **WebSocket 客户端模式**主动连接飞书服务器，无需配置 Webhook。
+
+飞书应用配置：
+- 应用类型：自建应用
+- 事件订阅：无需配置（使用 WebSocket 模式）
+- 权限：`im:message`、`im:message:group_at_msg`、`contact:user.base:readonly`
+
+### 容器网络
+
+确保 Docker 容器可以访问宿主机的 Docker socket：
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+```
+
+## 本地开发
 
 ```bash
-# 安装编译工具
-sudo apt install -y build-essential python3
-
 # 安装依赖
 npm install
 
@@ -129,8 +169,27 @@ docker-compose restart
 docker-compose down
 
 # 查看日志
-docker-compose logs -f relay-server
+docker-compose logs -f
 
 # 进入容器
-docker exec -it openclaw-relay sh
+docker exec -it lingsynapse sh
 ```
+
+## 故障排查
+
+### 飞书连接失败
+
+1. 检查 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 是否正确
+2. 查看日志中的 `[FeishuWS]` 相关错误
+3. 确认网络可以访问 `open.feishu.cn`
+
+### 容器启动失败
+
+1. 检查 Docker socket 挂载是否正确
+2. 确认 Docker 网络存在：`docker network ls`
+3. 查看容器日志：`docker-compose logs`
+
+### Token 验证失败
+
+1. 检查 `JWT_SECRET` 是否设置
+2. 确认 Token 未过期（默认 30 天）

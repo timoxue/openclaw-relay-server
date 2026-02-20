@@ -3,6 +3,13 @@ import { feishuAPI } from '../services/feishu-api';
 import { database } from '../services/database';
 import crypto from 'crypto';
 
+// ============================================================================
+// @DEPRECATED - 此路由已废弃，请使用 Feishu WebSocket 客户端模式
+// ============================================================================
+// 中继服务器现在使用 WebSocket 客户端主动连接飞书，不再使用 webhook。
+// 请参考 src/services/feishu-websocket.ts 和 src/server.ts 中的初始化逻辑。
+// ============================================================================
+
 // Import WebSocketService - will be initialized later
 let wsService: any = null;
 let dualWsService: any = null;
@@ -103,6 +110,17 @@ const router = Router();
 
 // 飞书消息 webhook
 router.post('/webhook', async (req: Request, res: Response) => {
+  // 检查是否启用 legacy webhook（默认禁用）
+  const enableLegacyWebhook = process.env.ENABLE_LEGACY_WEBHOOK === 'true';
+
+  if (!enableLegacyWebhook) {
+    console.warn('[FeishuRoute] Webhook endpoint is deprecated. Use Feishu WebSocket client mode instead.');
+    return res.status(410).json({
+      error: 'Gone',
+      message: '此 webhook 端点已废弃。中继服务器现在使用 WebSocket 客户端模式主动连接飞书。',
+      reference: 'src/services/feishu-websocket.ts'
+    });
+  }
   console.log('Received Feishu webhook:', JSON.stringify(req.body, null, 2));
 
   const { encrypt, type, challenge, header, event } = req.body as FeishuWebhookEvent & {

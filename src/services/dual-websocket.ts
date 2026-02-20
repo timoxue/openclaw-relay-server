@@ -1,3 +1,11 @@
+// ============================================================================
+// @DEPRECATED - 此服务已废弃，请使用 ws-tunnel.ts 和 feishu-websocket.ts
+// ============================================================================
+// 双 WebSocket 服务已被新的架构替代：
+// - 飞书连接: src/services/feishu-websocket.ts (WebSocket 客户端)
+// - 容器连接: src/services/ws-tunnel.ts (WebSocket 隧道)
+// ============================================================================
+
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomBytes } from 'crypto';
 import { database } from './database';

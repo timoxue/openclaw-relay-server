@@ -1,45 +1,45 @@
-# OpenClaw Relay Server
+# LingSynapse - OpenClaw 中继服务器
 
-OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
+LingSynapse 是 OpenClaw 的中继服务器，用于飞书消息路由和多用户支持。
 
 ## 系统架构
 
 ```
 ┌───────────────────────────────────────────────┐
-│        OpenClaw Relay Server            │
+│                LingSynapse                 │
 ├───────────────────────────────────────────────┤
 │                                              │
 │  ┌──────────┐  ┌──────────┐        │
-│  │Feishu API │  │Dual WS   │  │ HTTP API│
+│  │Feishu API │  │Feishu WS │  │ HTTP API│
 │  └──────────┘  └──────────┘        │
 │       ↓       ↑       ↑       ↑        │
 │  ┌──────────┐  ┌──────────┐        │
-│  │ Webhook   │  │Feishu WS │  │ Config  │
+│  │Orchestrator│  │WS Tunnel │  │ Config  │
 │  └──────────┘  └──────────┘        │
 │       ↓       ↓       ↓                │
 │  ┌──────────────────────────────────┐  │
-│  │    Message Queue System        │  │
-│  └──────────────────────────────────┘  │
-│       ↓                                 │
-│  ┌──────────────────────────────────┐  │
-  │  FeishuAPI Token Manager       │  │
+│  │    Docker Orchestrator       │  │
 │  └──────────────────────────────────┘  │
 │       ↓                                 │
 │  ┌──────────────┐  ┌───────────┐  │
-│  │OpenClaw WS  │  │  Database  │       │
+│  │User Containers│  │  Database  │       │
 │  └──────────────┘  └───────────┘       │
-│       ↓                                    │
-│  ┌───────────────────────────────────┐ │
-  │  OpenClaw Gateway (本地)        │ │
-│  └───────────────────────────────────┘       │
 └─────────────────────────────────────────────┘
 ```
+
+## 连接方式
+
+**飞书连接**：使用 WebSocket 客户端模式主动连接飞书服务器
+- 接收消息：通过飞书 WebSocket 接收实时消息
+- 发送消息：通过飞书 API 发送回复
+
+**用户容器连接**：通过 WebSocket 隧道连接每个用户的 Docker 容器
 
 ## 多用户架构
 
 ### 工作原理
 
-本系统允许多个用户共享同一个飞书机器人，通过中继服务器将消息分发到各自的 OpenClaw 实例。每个用户需要在自己的 OpenClaw 上安装 `openclaw-feishu-relay-channel` 插件。
+本系统允许多个用户共享同一个飞书机器人，通过中继服务器将消息分发到各自的 OpenClaw 实例。每个用户获得独立的 Docker 沙箱容器。
 
 ### 架构图
 
@@ -58,13 +58,13 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
 │  └───────────────────────────┬───────────────────────────────────┘  │
 └──────────────────────────────┼──────────────────────────────────────┘
                                │
-                               │ Webhook / 消息
+                               │ WebSocket 实时连接
                                ↓
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    OpenClaw Relay Server                          │
+│                    LingSynapse 中继服务器                        │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │              Message Queue & Dispatcher                       │  │
-│  │  将消息发送到对应的 OpenClaw Gateway                           │  │
+│  │              Message Dispatcher (Orchestrator)              │  │
+│  │  将消息发送到对应的用户容器                              │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │
@@ -73,11 +73,9 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
          ↓                     ↓                     ↓
 ┌────────────────┐     ┌────────────────┐     ┌────────────────┐
 │  用户 A         │     │  用户 B         │     │  用户 C         │
-│  OpenClaw      │     │  OpenClaw      │     │  OpenClaw      │
+│  Docker 沙箱    │     │  Docker 沙箱    │     │  Docker 沙箱    │
 │  ┌────────────┐ │     │  ┌────────────┐ │     │  ┌────────────┐ │
-│  │  插件      │ │     │  │  插件      │ │     │  │  插件      │ │
-│  │  (连接到    │ │     │  │  (连接到    │ │     │  │  (连接到    │ │
-│  │   中继服务器)│ │     │  │   中继服务器)│ │     │  │   中继服务器)│ │
+│  │ Gateway    │ │     │  │ Gateway    │ │     │  │ Gateway    │ │
 │  └────────────┘ │     │  └────────────┘ │     │  └────────────┘ │
 │  Agent         │     │  Agent         │     │  Agent         │
 └────────────────┘     └────────────────┘     └────────────────┘
@@ -90,17 +88,17 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
 ```
 用户 A (飞书) → 飞书机器人
               ↓
-           Webhook 事件
+           WebSocket 实时推送
               ↓
-         中继服务器接收
+         中继服务器接收 (FeishuWebSocketClient)
               ↓
     查找用户 A 对应的 JWT token
               ↓
-    发送到 用户 A 的 OpenClaw Gateway
+    通过 WebSocket Tunnel 发送到用户 A 的容器
               ↓
          用户 A 的 Agent 处理
               ↓
-    Agent 响应发送回中继服务器
+    Agent 响应通过 WebSocket Tunnel 返回
               ↓
          中继服务器通过飞书 API 发送回复
               ↓
@@ -112,7 +110,7 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
 ```
 用户 A 的 OpenClaw Cron 任务
               ↓
-    发送 HTTP 请求到中继服务器
+    通过 WebSocket Tunnel 发送请求
               ↓
          验证 JWT token
               ↓
@@ -125,21 +123,15 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
 
 1. **飞书授权**：通过 OAuth 获取飞书访问权限
 2. **JWT Token**：中继服务器生成的认证 token
-3. **安装插件**：在本地 OpenClaw 上安装 `openclaw-feishu-relay-channel` 插件
-4. **配置插件**：
-   ```json
-   {
-     "relayUrl": "ws://中继服务器地址/openclaw",
-     "token": "用户的 JWT token"
-   }
-   ```
+3. **容器启动**：通过 `!openclaw start` 命令启动个人沙箱
 
 ## 功能特性
 
 ### WebSocket 消息路由
-- **双 WebSocket 架构**：分别处理飞书和 OpenClaw 两个方向的连接
+- **飞书 WebSocket 客户端**：主动连接飞书，实时接收消息
+- **WebSocket 隧道**：连接中继服务器与用户容器
 - **消息转发**：双向消息路由和处理
-- **队列机制**：离线消息缓存，连接后自动发送
+- **离线消息**：容器离线时消息排队
 
 ### Token 管理
 - **双层缓存**：内存缓存 + 数据库持久化
@@ -147,13 +139,13 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
 - **自动重试**：API 失败时自动刷新 token 并重试
 
 ### 用户认证
-- **JWT Token 认证**：Gateway 连接时使用 JWT 认证
+- **JWT Token 认证**：容器连接时使用 JWT 认证
 - **用户映射**：飞书 user_id ↔ JWT token 映射
 - **会话管理**：WebSocket 会话跟踪
 - **连接状态**：实时 WebSocket 连接状态
 
 ### 飞书集成
-- **消息接收**：Webhook 接收飞书消息
+- **消息接收**：WebSocket 客户端接收飞书消息
 - **文本消息**：支持文本消息发送
 - **富文本**：支持富文本消息
 - **用户信息**：获取飞书用户信息
@@ -163,33 +155,50 @@ OpenClaw-CN 的中继服务器，用于飞书消息路由和多用户支持。
 - **Token 刷新**：刷新过期 Token
 - **配置获取**：获取 LLM 配置（需要认证）
 - **健康检查**：服务健康状态检查
-- **Webhook**：飞书消息接收端点
+
+### 容器管理
+- **Docker 沙箱**：每个用户独立的 Docker 容器
+- **状态机**：用户容器状态管理
+- **命令控制**：`!openclaw` 命令控制容器
+- **自动清理**：超时容器自动停止
 
 ### 数据库
 - **用户表**：存储飞书用户、JWT token、飞书 OAuth token
 - **会话表**：WebSocket 会话管理
-- **配置表**：存储飞书 tenant_access_token（持久化）
 - **索引优化**：快速查询索引
 
 ## 项目结构
 
 ```
-openclaw-relay-server/
+lingsynapse/
 ├── src/
-│   ├── server.ts              # Express 主服务器
+│   ├── server.ts                 # Express 主服务器
+│   ├── middleware/
+│   │   └── auth.ts            # JWT 认证中间件
 │   ├── services/
-│   │   ├── database.ts         # 数据库服务
-│   │   ├── token.ts             # JWT Token 服务
-│   │   ├── feishu-api.ts       # 飞书 API 客户端
-│   │   ├── feishu-oauth.ts     # 飞书 OAuth 服务
-│   ├── websocket.ts          # 单 WebSocket 服务（备用）
-│   └── dual-websocket.ts    # 双 WebSocket 服务（主要）
-│   └── routes/
-│       ├── auth.ts             # 认证路由
-│       ├── config.ts           # 配置路由
-│       └── feishu.ts          # 飞书路由
-├── database/                   # 数据库目录
+│   │   ├── database.ts          # 数据库服务
+│   │   ├── token.ts            # JWT Token 服务
+│   │   ├── feishu-api.ts      # 飞书 API 客户端
+│   │   ├── feishu-oauth.ts    # 飞书 OAuth 服务
+│   │   ├── feishu-websocket.ts # 飞书 WebSocket 客户端
+│   │   ├── orchestrator.ts      # 消息路由和容器编排
+│   │   ├── docker-orchestrator.ts # Docker 容器管理
+│   │   └── ws-tunnel.ts        # WebSocket 隧道
+│   ├── routes/
+│   │   ├── auth.ts            # 认证路由
+│   │   ├── config.ts          # 配置路由
+│   │   ├── feishu.ts         # 飞书路由 (webhook 已废弃)
+│   │   ├── qrcode.ts          # OAuth 二维码流程
+│   │   └── orchestrator.ts     # 容器管理路由
+│   ├── types/
+│   │   └── index.ts           # TypeScript 类型定义
+│   └── utils/
+│       └── logger.ts          # 日志工具
+├── database/                   # SQLite 数据库目录
 ├── config/                     # 配置目录
+│   ├── .env                   # 环境变量
+│   ├── docker.json            # Docker 配置
+│   └── feishu.json           # 飞书应用配置
 ├── docker-compose.yml           # Docker Compose 配置
 ├── Dockerfile                 # Docker 构建文件
 ├── package.json                # 项目依赖
@@ -225,6 +234,23 @@ docker-compose logs -f
 docker-compose down
 ```
 
+## 命令使用
+
+### OpenClaw 控制命令
+
+在飞书中与机器人对话，使用以下命令：
+
+| 命令 | 说明 |
+|-------|------|
+| `!openclaw` | 进入 OpenClaw 控制模式 |
+| `!openclaw status` | 查看容器状态 |
+| `!openclaw start` | 启动容器 |
+| `!openclaw restart` | 重启容器 |
+| `!openclaw stop` | 停止容器 |
+| `!openclaw rebuild` | 重新部署容器 |
+| `!openclaw help` | 查看所有命令 |
+| `!exit` | 退出当前模式 |
+
 ## Token 管理策略
 
 ### 缓存机制
@@ -248,8 +274,7 @@ docker-compose down
 ### 添加新的消息类型
 
 1. 在 `src/services/feishu-api.ts` 中添加新的发送方法
-2. 在 `src/services/dual-websocket.ts` 中添加消息处理逻辑
-3. 更新 WebSocket 消息格式
+2. 在 `src/services/orchestrator.ts` 中添加消息处理逻辑
 
 ## 许可证
 
