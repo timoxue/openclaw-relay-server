@@ -34,6 +34,7 @@ export interface FeishuCardElement {
   tag: string;
   text?: any;
   actions?: any[];
+  elements?: any[];
 }
 
 export interface FeishuCard {
