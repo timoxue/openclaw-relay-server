@@ -35,10 +35,12 @@ export interface ConfigResponse {
 
 export interface DockerContainerInfo {
   containerId: string;
+  proxyContainerId?: string;
   userId: string;
   userToken: string;
   gatewayToken: string;
   port: number;
+  internalPort?: number;
   status: 'creating' | 'running' | 'stopped' | 'error';
   createdAt: Date;
 }
