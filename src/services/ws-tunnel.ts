@@ -1,274 +1,681 @@
+/**
+ * ============================================================================
+ * WebSocket Tunnel Service - 智能消息隧道
+ * ============================================================================
+ *
+ * 实现透明的双向管道：
+ * - Node client (PC) connection
+ * - Docker container WebSocket connection (via container hostname)
+ * - Relay server (this service)
+ *
+ * 每个用户有独立的 Node 连接和容器 WebSocket 连接。
+ *
+ * 内网直连：ws://sandbox-${userId}:38789
+ * ============================================================================
+ */
+
 import WebSocket from 'ws';
-import * as net from 'net';
+import { generateKeyPairSync, createHash, sign, createPublicKey } from 'crypto';
+import { randomUUID } from 'crypto';
+
+/**
+ * Device Identity for OpenClaw Gateway authentication
+ */
+interface DeviceIdentity {
+  deviceId: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+}
+
+// Protocol constants
+const PROTOCOL_VERSION = 3;
+const CLIENT_ID = 'gateway-client';
+const CLIENT_VERSION = '1.0.0';
+const CLIENT_PLATFORM = 'node';
+const CLIENT_MODE = 'backend';
+
+// ED25519 SPKI prefix for raw key extraction
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+// Device identity cache per user
+const deviceIdentityCache = new Map<string, DeviceIdentity>();
+
+/**
+ * Derive raw public key from PEM
+ */
+function derivePublicKeyRaw(publicKeyPem: string): Buffer {
+  const key = createPublicKey(publicKeyPem);
+  const spki = key.export({ type: "spki", format: "der" }) as Buffer;
+  if (
+    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
+    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
+  ) {
+    return spki.subarray(ED25519_SPKI_PREFIX.length);
+  }
+  return spki;
+}
+
+/**
+ * Generate ED25519 device identity
+ */
+function generateDeviceIdentity(): DeviceIdentity {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  const raw = derivePublicKeyRaw(publicKeyPem);
+  const deviceId = createHash('sha256').update(raw).digest('hex');
+
+  return { deviceId, publicKeyPem, privateKeyPem };
+}
+
+/**
+ * Get or create device identity for user
+ */
+function getDeviceIdentity(userId: string): DeviceIdentity {
+  if (!deviceIdentityCache.has(userId)) {
+    const identity = generateDeviceIdentity();
+    deviceIdentityCache.set(userId, identity);
+    console.log(`[WSTunnel] Generated device identity for ${userId}: ${identity.deviceId.substring(0, 16)}...`);
+  }
+  return deviceIdentityCache.get(userId)!;
+}
+
+/**
+ * Base64 URL encode
+ */
+function base64UrlEncode(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Build device auth payload for signing
+ */
+function buildDeviceAuthPayload(params: {
+  deviceId: string;
+  clientId: string;
+  clientMode: string;
+  role: string;
+  scopes: string[];
+  signedAtMs: number;
+  token?: string | undefined;
+  nonce?: string | undefined;
+  version?: string;
+}): string {
+  const version = params.version || (params.nonce ? "v2" : "v1");
+  const scopes = params.scopes.join(",");
+  const token = params.token ?? "";
+  const base = [
+    version,
+    params.deviceId,
+    params.clientId,
+    params.clientMode,
+    params.role,
+    scopes,
+    String(params.signedAtMs),
+    token,
+  ];
+  if (version === "v2") {
+    base.push(params.nonce ?? "");
+  }
+  return base.join("|");
+}
+
+/**
+ * Sign device auth payload using ED25519
+ */
+function signDeviceAuth(payload: string, privateKeyPem: string): string {
+  const signature = sign(null, Buffer.from(payload), privateKeyPem);
+  return signature.toString('base64');
+}
+
+/**
+ * Gateway CLI handshake payload (auth-1)
+ */
+interface GatewayHandshakeAuth {
+  type: 'req';
+  id: string;
+  method: 'gateway.connect';
+  params: {
+    minProtocol: 3;
+    maxProtocol: 3;
+    client: { id: 'cli', version: '1.0.0', platform: 'linux', mode: 'cli' };
+    role: 'operator';
+    auth: { token: string };
+  };
+}
+
+/**
+ * Agent chat request payload
+ */
+interface AgentChatRequest {
+  type: 'req';
+  id: string;
+  method: 'agent.chat';
+  params: {
+    agentId: string;
+    message: string;
+  };
+}
+
+/**
+ * JSON-RPC response payload (agent.chat res)
+ */
+interface AgentChatResponse {
+  type: 'res';
+  id: string;
+  method: 'agent.chat';
+  result?: {
+    type: 'chat';
+    content: string;
+  };
+}
+
+/**
+ * Container WebSocket connection interface with handshake state
+ */
+interface ContainerWSConnection extends WebSocket {
+  gatewayToken?: string;
+  userId?: string;
+  handshakeComplete?: boolean;
+  challengeNonce?: string;
+  deviceIdentity?: DeviceIdentity;
+}
 
 /**
  * WebSocket Tunnel Service
- *
- * Implements a transparent three-way pipe (三通管道) between:
- * - Node client (PC) connection
- * - Docker container WebSocket connection
- * - Relay server (this service)
- *
- * Each user has their own Node connection and their own Docker container.
- * The tunnel service manages bidirectional message forwarding between these connections.
  */
 export class WSTunnelService {
-  // Map of user ID to Node WebSocket connection (PC side)
   private nodeConnections: Map<string, WebSocket> = new Map();
+  private containerConnections: Map<string, ContainerWSConnection> = new Map();
+  private forwardConnections: Map<string, WebSocket> = new Map();
+  private pendingMessages: Map<string, any[]> = new Map();
 
-  // Map of user ID to Container WebSocket connection (Docker side)
-  private containerConnections: Map<string, WebSocket> = new Map();
-
-  /**
-   * Check if a TCP port is reachable
-   */
-  private async isPortReachable(host: string, port: number, timeout: number = 2000): Promise<boolean> {
-    return new Promise((resolve) => {
-      const socket = new net.Socket();
-
-      socket.setTimeout(timeout);
-
-      socket.on('connect', () => {
-        socket.destroy();
-        resolve(true);
-      });
-
-      socket.on('timeout', () => {
-        socket.destroy();
-        resolve(false);
-      });
-
-      socket.on('error', () => {
-        socket.destroy();
-        resolve(false);
-      });
-
-      socket.connect(port, host);
-    });
-  }
+  private readonly MAX_RETRIES = 5;
+  private readonly RETRY_DELAY_MS = 1000;
 
   /**
    * Register Node (PC) connection for a user
-   *
-   * @param userId - User identifier
-   * @param ws - WebSocket connection from Node client
    */
   registerNodeConnection(userId: string, ws: WebSocket): void {
-    // Close existing connection if any
     const existingConnection = this.nodeConnections.get(userId);
     if (existingConnection && existingConnection.readyState === WebSocket.OPEN) {
       console.log(`[WSTunnel] Closing existing Node connection for user ${userId}`);
       existingConnection.close();
     }
-
-    // Register new connection
     this.nodeConnections.set(userId, ws);
     console.log(`[WSTunnel] Registered Node connection for user ${userId}`);
 
-    // Set up message handler for Node connection
     ws.on('message', (data: WebSocket.Data) => {
       this.handleNodeMessage(userId, data);
     });
 
-    // Handle Node connection close
     ws.on('close', () => {
       console.log(`[WSTunnel] Node connection closed for user ${userId}`);
       this.nodeConnections.delete(userId);
-
-      // Also disconnect container when Node disconnects
       this.disconnectContainer(userId);
     });
 
-    // Handle Node connection error
     ws.on('error', (error) => {
       console.error(`[WSTunnel] Node connection error for user ${userId}:`, error);
     });
   }
 
   /**
-   * Connect to Docker container WebSocket for a user with port check and retry logic
-   *
-   * @param userId - User identifier
-   * @param containerPort - Port of Docker container (unused when connecting via container name)
-   * @returns Promise that resolves when connection is established
+   * Connect to Docker container WebSocket with retry mechanism
    */
-  async connectToContainer(userId: string, containerPort: number): Promise<void> {
-    // Close existing container connection if any
-    const existingConnection = this.containerConnections.get(userId);
-    if (existingConnection && existingConnection.readyState === WebSocket.OPEN) {
-      console.log(`[WSTunnel] Closing existing container connection for user ${userId}`);
-      existingConnection.close();
-    }
+  async connectToContainer(userId: string, gatewayToken: string): Promise<void> {
+    const safeId = this.sanitizeUserId(userId);
+    const containerName = `openclaw-sandbox-${safeId}`;
+    const containerUrl = `ws://${containerName}:38789`;
 
-    // Container name format: openclaw-sandbox-{userId}
-    // Relay server is in the same Docker network (synapse-net), so we can connect via container name
-    const containerName = `openclaw-sandbox-${userId}`;
-    const containerUrl = `ws://${containerName}:18789`;
-    console.log(`[WSTunnel] Connecting to container ${containerName} for user ${userId} at ${containerUrl}`);
+    console.log(`[WSTunnel] Connecting to container ${containerName}...`);
 
-    // Retry logic: check port first, then try WebSocket connection
-    const maxRetries = 15;
-    const retryDelay = 1000; // 1 second between checks
+    let attempt = 0;
+    let lastError: Error | null = null;
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      console.log(`[WSTunnel] Connection attempt ${attempt}/${maxRetries} for user ${userId}`);
+    while (attempt < this.MAX_RETRIES) {
+      attempt++;
+      console.log(`[WSTunnel] Connection attempt ${attempt}/${this.MAX_RETRIES} for ${containerName}`);
 
-      // Step 1: Check if port is reachable
-      const portReachable = await this.isPortReachable(containerName, 18789, 1000);
-      console.log(`[WSTunnel] Port 18789 check for ${containerName}: ${portReachable ? 'REACHABLE' : 'NOT REACHABLE'}`);
-
-      if (!portReachable) {
-        if (attempt < maxRetries) {
-          console.log(`[WSTunnel] Port not reachable, retrying in ${retryDelay / 1000} seconds...`);
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-          continue;
-        } else {
-          throw new Error(`Port 18789 not reachable after ${maxRetries} attempts`);
-        }
-      }
-
-      // Step 2: Try WebSocket connection
       try {
-        await this.tryConnect(userId, containerName, containerUrl);
-        console.log(`[WSTunnel] Successfully connected to container for user ${userId}`);
-        return;
-      } catch (error: any) {
-        console.log(`[WSTunnel] WebSocket connection attempt ${attempt} failed for user ${userId}: ${error.message}`);
+        const ws = await this.connectWithRetry(containerUrl, 5000);
+        const containerWs = ws as ContainerWSConnection;
 
-        if (attempt < maxRetries) {
-          console.log(`[WSTunnel] Retrying in ${retryDelay / 1000} seconds...`);
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-        } else {
-          console.error(`[WSTunnel] All connection attempts failed for user ${userId}`);
-          throw error;
-        }
-      }
-    }
-  }
+        containerWs.gatewayToken = gatewayToken;
+        containerWs.userId = userId;
+        containerWs.handshakeComplete = false;
+        containerWs.deviceIdentity = getDeviceIdentity(userId);
 
-  /**
-   * Try to connect to container WebSocket
-   */
-  private tryConnect(userId: string, containerName: string, containerUrl: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const containerWs = new WebSocket(containerUrl);
-
-      // Set connection timeout
-      const timeout = setTimeout(() => {
-        containerWs.terminate();
-        reject(new Error('Connection timeout'));
-      }, 5000); // 5 second timeout
-
-      // Handle connection open
-      containerWs.on('open', () => {
-        clearTimeout(timeout);
-        console.log(`[WSTunnel] Connected to container for user ${userId}`);
-        this.containerConnections.set(userId, containerWs);
-
-        // Set up message handler for container connection
+        // Set up message handler BEFORE sending any request
         containerWs.on('message', (data: WebSocket.Data) => {
           this.handleContainerMessage(userId, data);
         });
 
-        // Handle container connection close
         containerWs.on('close', () => {
           console.log(`[WSTunnel] Container connection closed for user ${userId}`);
           this.containerConnections.delete(userId);
         });
 
-        resolve();
+        containerWs.on('error', (error) => {
+          console.error(`[WSTunnel] Container connection error for user ${userId}:`, error);
+        });
+
+        this.containerConnections.set(userId, containerWs);
+
+        // Wait for connect.challenge event before sending connect request
+        console.log(`[WSTunnel] Waiting for connect challenge...`);
+        await this.waitForConnectChallenge(userId, 10000);
+
+        // Send connect request (must be first message)
+        await this.sendConnectRequest(containerWs, gatewayToken);
+
+        this.flushPendingMessages(userId);
+
+        console.log(`[WSTunnel] Successfully connected to container ${containerName}`);
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (error.code === 'ECONNREFUSED') {
+          console.warn(`[WSTunnel] Connection refused, retrying in ${this.RETRY_DELAY_MS}ms...`);
+          await this.sleep(this.RETRY_DELAY_MS);
+          continue;
+        } else {
+          console.error(`[WSTunnel] Connection failed:`, error);
+          throw error;
+        }
+      }
+    }
+
+    throw new Error(`Failed to connect to container ${containerName} after ${this.MAX_RETRIES} attempts. Last error: ${lastError?.message}`);
+  }
+
+  /**
+   * Connect with timeout
+   */
+  private connectWithRetry(url: string, timeout: number): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url, {
+        headers: {
+          'Host': '127.0.0.1:18789'
+        }
       });
 
-      // Handle connection error
-      containerWs.on('error', (error: any) => {
-        clearTimeout(timeout);
-        containerWs.terminate();
+      const timer = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+          reject(new Error(`Connection timeout after ${timeout}ms`));
+        }
+      }, timeout);
+
+      ws.on('open', () => {
+        clearTimeout(timer);
+        if (ws.readyState === WebSocket.OPEN) {
+          resolve(ws);
+        } else {
+          reject(new Error(`WebSocket opened in unexpected state: ${ws.readyState}`));
+        }
+      });
+
+      ws.on('error', (error) => {
+        clearTimeout(timer);
         reject(error);
       });
     });
   }
 
   /**
-   * Handle messages from Node client and forward to container
-   *
-   * @param userId - User identifier
-   * @param data - Message data from Node client
+   * Sleep utility
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Wait for connect.challenge event from container
+   */
+  private async waitForConnectChallenge(userId: string, timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const containerWs = this.containerConnections.get(userId);
+      if (!containerWs) {
+        reject(new Error('Container connection not found'));
+        return;
+      }
+
+      let timeout: NodeJS.Timeout;
+
+      const challengeHandler = (data: WebSocket.Data) => {
+        try {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'event' && message.event === 'connect.challenge') {
+            const nonce = message.payload?.nonce;
+            if (nonce) {
+              containerWs.challengeNonce = nonce;
+              console.log(`[WSTunnel] Received connect challenge for user ${userId} with nonce: ${nonce.substring(0, 16)}...`);
+            } else {
+              console.log(`[WSTunnel] Received connect challenge for user ${userId} (no nonce)`);
+            }
+            clearTimeout(timeout);
+            containerWs.off('message', challengeHandler);
+            resolve();
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      };
+
+      containerWs.on('message', challengeHandler);
+
+      timeout = setTimeout(() => {
+        containerWs.off('message', challengeHandler);
+        reject(new Error(`Connect challenge timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Send connect request (must be first message after challenge)
+   */
+  private sendConnectRequest(ws: WebSocket, token: string): void {
+    const containerWs = ws as ContainerWSConnection;
+
+    if (!containerWs.deviceIdentity) {
+      console.error('[WSTunnel] No device identity available for connect request');
+      return;
+    }
+
+    const signedAtMs = Date.now();
+    const scopes = ['operator.write', 'operator.read'];
+    const role = 'operator';
+
+    // Build device auth payload with signature
+    const authPayload = buildDeviceAuthPayload({
+      deviceId: containerWs.deviceIdentity.deviceId,
+      clientId: CLIENT_ID,
+      clientMode: CLIENT_MODE,
+      role,
+      scopes,
+      signedAtMs,
+      token: token || undefined,
+      nonce: containerWs.challengeNonce || undefined,
+      version: "v2",
+    });
+
+    const signature = signDeviceAuth(authPayload, containerWs.deviceIdentity.privateKeyPem);
+
+    // Get public key raw bytes and base64 URL encode
+    const publicKeyRaw = derivePublicKeyRaw(containerWs.deviceIdentity.publicKeyPem);
+    const publicKeyBase64 = base64UrlEncode(publicKeyRaw);
+
+    const connectPayload = {
+      type: 'req',
+      id: 'connect',
+      method: 'connect',
+      params: {
+        minProtocol: PROTOCOL_VERSION,
+        maxProtocol: PROTOCOL_VERSION,
+        role,
+        scopes,
+        client: {
+          id: CLIENT_ID,
+          displayName: 'LingSynapse Gateway',
+          version: CLIENT_VERSION,
+          platform: CLIENT_PLATFORM,
+          mode: CLIENT_MODE,
+          instanceId: randomUUID(),
+        },
+        auth: token ? { token } : undefined,
+        device: {
+          id: containerWs.deviceIdentity.deviceId,
+          publicKey: publicKeyBase64,
+          signature,
+          signedAt: signedAtMs,
+          nonce: containerWs.challengeNonce || undefined,
+        },
+      },
+    };
+    ws.send(JSON.stringify(connectPayload));
+    console.log('[WSTunnel] Sent connect request with device identity');
+  }
+
+  /**
+   * Handle messages from Node client (upstream from PC)
    */
   private handleNodeMessage(userId: string, data: WebSocket.Data): void {
+    try {
+      const message = JSON.parse(data.toString());
+      console.log(`[WSTunnel] Received from Node (user ${userId}):`, message);
+
+      switch (message.type) {
+        case 'chat':
+          this.sendAgentChatRequest(userId, message);
+          break;
+        case 'ping':
+          const containerWs = this.containerConnections.get(userId);
+          if (containerWs && containerWs.readyState === WebSocket.OPEN) {
+            containerWs.send(JSON.stringify({ type: 'ping' }));
+          }
+          break;
+        case 'disconnect':
+          this.disconnectContainer(userId);
+          break;
+        default:
+          console.warn(`[WSTunnel] Unknown message type from Node: ${message.type}`);
+      }
+    } catch (error) {
+      console.error(`[WSTunnel] Error handling Node message:`, error);
+    }
+  }
+
+  /**
+   * Send Agent Chat request to OpenClaw
+   */
+  private sendAgentChatRequest(userId: string, message: any): void {
     const containerWs = this.containerConnections.get(userId);
 
     if (!containerWs || containerWs.readyState !== WebSocket.OPEN) {
-      console.warn(`[WSTunnel] No active container connection for user ${userId}, cannot forward message`);
+      this.addPendingMessage(userId, message);
       return;
     }
 
-    try {
-      // Forward message to container
-      containerWs.send(data);
-      console.log(`[WSTunnel] Forwarded message from Node to container for user ${userId}`);
-    } catch (error) {
-      console.error(`[WSTunnel] Error forwarding message to container for user ${userId}:`, error);
+    if (message.params?.agentId) {
+      const chatRequest: AgentChatRequest = {
+        type: 'req',
+        id: Date.now().toString(),
+        method: 'agent.chat',
+        params: {
+          agentId: message.params.agentId || 'main',
+          message: message.params?.message || message.text || '',
+        },
+      };
+      containerWs.send(JSON.stringify(chatRequest));
+    } else {
+      const text = message.text || message.params?.text || '';
+      const chatRequest: AgentChatRequest = {
+        type: 'req',
+        id: Date.now().toString(),
+        method: 'agent.chat',
+        params: {
+          agentId: 'main',
+          message: text,
+        },
+      };
+      containerWs.send(JSON.stringify(chatRequest));
     }
   }
 
   /**
-   * Handle messages from container and forward to Node client
-   *
-   * @param userId - User identifier
-   * @param data - Message data from container
+   * Handle messages from OpenClaw container (downstream)
    */
   private handleContainerMessage(userId: string, data: WebSocket.Data): void {
-    const nodeWs = this.nodeConnections.get(userId);
-
-    if (!nodeWs || nodeWs.readyState !== WebSocket.OPEN) {
-      console.warn(`[WSTunnel] No active Node connection for user ${userId}, cannot forward message`);
-      return;
-    }
-
     try {
-      // Forward message to Node client
-      nodeWs.send(data);
-      console.log(`[WSTunnel] Forwarded message from container to Node for user ${userId}`);
+      const message = JSON.parse(data.toString());
+      console.log(`[WSTunnel] Received from container (user ${userId}):`, message);
+
+      switch (message.type) {
+        case 'res':
+          // Handle connect response
+          if (message.id === 'connect') {
+            if (message.ok) {
+              console.log(`[WSTunnel] ✓ Handshake successful for user ${userId}`);
+              const containerWs = this.containerConnections.get(userId) as ContainerWSConnection;
+              if (containerWs) {
+                containerWs.handshakeComplete = true;
+              }
+            } else {
+              console.error(`[WSTunnel] ✗ Handshake failed for user ${userId}:`, message.error);
+            }
+          } else if (message.ok === true && message.result?.type === 'chat') {
+            const content = message.result.content || '';
+            this.sendToFeishu(userId, content);
+          } else if (message.ok === false) {
+            const errorMsg = typeof message.error === 'string'
+              ? message.error
+              : JSON.stringify(message.error || 'Unknown error');
+            this.sendToFeishu(userId, `Error: ${errorMsg}`);
+          }
+          break;
+        case 'req':
+          if (message.method === 'agent.chat') {
+            this.sendToFeishu(userId, message.params?.message || '');
+          }
+          break;
+        case 'event':
+          if (message.event === 'connect.challenge') {
+            console.log(`[WSTunnel] Received connect challenge for user ${userId}`);
+            // Handled by waitForConnectChallenge
+          } else if (message.event === 'chat') {
+            // Handle chat completion events
+            if (message.payload?.state === 'final' && message.payload?.message) {
+              const msg = message.payload.message;
+              if (msg.content && Array.isArray(msg.content) && msg.content.length > 0) {
+                // Build message from content blocks
+                let text = '';
+                for (const block of msg.content) {
+                  if (block.type === 'text') {
+                    text += block.text;
+                  } else if (block.type === 'tool_use') {
+                    text += `\n[使用工具: ${block.name}]`;
+                  } else if (block.type === 'tool_result') {
+                    text += `\n[工具结果]`;
+                  }
+                }
+                if (text) {
+                  this.sendToFeishu(userId, text);
+                }
+              }
+            }
+          } else if (message.event === 'agent') {
+            // Handle agent events including errors
+            if (message.payload?.stream === 'lifecycle' && message.payload?.data?.phase === 'error') {
+              const error = message.payload.data.error || 'Unknown agent error';
+              console.log(`[WSTunnel] Agent error for user ${userId}: ${error}`);
+              this.sendToFeishu(userId, error);
+            } else if (message.payload?.stream === 'error') {
+              const error = message.payload.data?.reason || 'Unknown error';
+              console.log(`[WSTunnel] Agent stream error for user ${userId}: ${error}`);
+            }
+          }
+          break;
+        case 'ping':
+          const nodeWs = this.nodeConnections.get(userId);
+          if (nodeWs && nodeWs.readyState === WebSocket.OPEN) {
+            nodeWs.send(JSON.stringify({ type: 'pong' }));
+          }
+          break;
+        default:
+          console.warn(`[WSTunnel] Unknown message type from container: ${message.type}`);
+      }
     } catch (error) {
-      console.error(`[WSTunnel] Error forwarding message to Node for user ${userId}:`, error);
+      console.error(`[WSTunnel] Error handling container message:`, error);
     }
   }
 
   /**
-   * Disconnect container connection for a user
-   *
-   * @param userId - User identifier
+   * Send message to Feishu
    */
-  disconnectContainer(userId: string): void {
+  private sendToFeishu(userId: string, content: string): void {
+    console.log(`[WSTunnel] Sending to Feishu for user ${userId}: ${content}`);
+    import('./orchestrator.js').then((module: any) => {
+      module.sendFeishuMessage(userId, content);
+    }).catch((error) => {
+      console.error(`[WSTunnel] Failed to send to Feishu: ${userId}:`, error);
+    });
+  }
+
+  /**
+   * Send chat message (main entry for orchestrator)
+   */
+  async sendChatMessage(userId: string, message: string): Promise<void> {
     const containerWs = this.containerConnections.get(userId);
-    if (containerWs && containerWs.readyState === WebSocket.OPEN) {
-      console.log(`[WSTunnel] Disconnecting container for user ${userId}`);
+
+    if (!containerWs || containerWs.readyState !== WebSocket.OPEN) {
+      console.warn(`[WSTunnel] No active container for user ${userId}`);
+      return;
+    }
+
+    const chatRequest: any = {
+      type: 'req',
+      id: Date.now().toString(),
+      method: 'chat.send',
+      params: {
+        sessionKey: 'default',
+        message,
+        idempotencyKey: Date.now().toString(),
+      },
+    };
+
+    containerWs.send(JSON.stringify(chatRequest));
+    console.log(`[WSTunnel] Sent chat message to container for user ${userId}: ${message}`);
+  }
+
+  /**
+   * Disconnect container connection
+   */
+  private disconnectContainer(userId: string): void {
+    const containerWs = this.containerConnections.get(userId);
+    if (containerWs) {
       containerWs.close();
       this.containerConnections.delete(userId);
+      console.log(`[WSTunnel] Disconnected container connection for user ${userId}`);
     }
   }
 
   /**
    * Disconnect Node connection for a user
-   *
-   * @param userId - User identifier
    */
-  disconnectNode(userId: string): void {
+  private disconnectNode(userId: string): void {
     const nodeWs = this.nodeConnections.get(userId);
-    if (nodeWs && nodeWs.readyState === WebSocket.OPEN) {
-      console.log(`[WSTunnel] Disconnecting Node for user ${userId}`);
+    if (nodeWs) {
       nodeWs.close();
       this.nodeConnections.delete(userId);
+      console.log(`[WSTunnel] Disconnected Node connection for user ${userId}`);
     }
+  }
 
-    // Also disconnect container when Node disconnects
+  /**
+   * Disconnect all connections for a user (both Node and container)
+   */
+  disconnectAll(userId: string): void {
+    this.disconnectNode(userId);
     this.disconnectContainer(userId);
   }
 
   /**
+   * Check if user has active container connection
+   */
+  hasActiveConnections(userId: string): boolean {
+    return this.containerConnections.has(userId);
+  }
+
+  /**
+   * Check if user has any active connection
+   */
+  hasAnyConnection(userId: string): boolean {
+    return this.nodeConnections.has(userId) || this.containerConnections.has(userId);
+  }
+
+  /**
    * Get connection counts
-   *
-   * @returns Object with node and container connection counts
    */
   getConnectionCounts(): { nodeConnections: number; containerConnections: number } {
     return {
@@ -278,29 +685,34 @@ export class WSTunnelService {
   }
 
   /**
-   * Check if user has active connections
-   *
-   * @param userId - User identifier
-   * @returns True if user has both Node and container connections
+   * Add a pending message for when container is not ready
    */
-  hasActiveConnections(userId: string): boolean {
-    const nodeWs = this.nodeConnections.get(userId);
-    const containerWs = this.containerConnections.get(userId);
-
-    return (
-      nodeWs?.readyState === WebSocket.OPEN &&
-      containerWs?.readyState === WebSocket.OPEN
-    );
+  private addPendingMessage(userId: string, message: any): void {
+    if (!this.pendingMessages.has(userId)) {
+      this.pendingMessages.set(userId, []);
+    }
+    this.pendingMessages.get(userId)!.push(message);
   }
 
   /**
-   * Disconnect all connections for a user
-   *
-   * @param userId - User identifier
+   * Flush pending messages after container is ready
    */
-  disconnectAll(userId: string): void {
-    this.disconnectNode(userId);
-    this.disconnectContainer(userId);
+  private flushPendingMessages(userId: string): void {
+    const pending = this.pendingMessages.get(userId);
+    if (pending && pending.length > 0) {
+      console.log(`[WSTunnel] Flushing ${pending.length} pending messages for user ${userId}`);
+      for (const msg of pending) {
+        this.handleNodeMessage(userId, JSON.stringify(msg));
+      }
+      this.pendingMessages.delete(userId);
+    }
+  }
+
+  /**
+   * Sanitize userId: replace underscores with hyphens, lowercase
+   */
+  private sanitizeUserId(userId: string): string {
+    return userId.replace(/_/g, '-').toLowerCase();
   }
 
   /**
@@ -309,28 +721,25 @@ export class WSTunnelService {
   shutdown(): void {
     console.log('[WSTunnel] Shutting down all connections...');
 
-    // Close all Node connections
     for (const [userId, nodeWs] of this.nodeConnections.entries()) {
       if (nodeWs.readyState === WebSocket.OPEN) {
-        console.log(`[WSTunnel] Closing Node connection for user ${userId}`);
         nodeWs.close();
       }
     }
-
     this.nodeConnections.clear();
 
-    // Close all container connections
     for (const [userId, containerWs] of this.containerConnections.entries()) {
       if (containerWs.readyState === WebSocket.OPEN) {
-        console.log(`[WSTunnel] Closing container connection for user ${userId}`);
         containerWs.close();
       }
     }
-
     this.containerConnections.clear();
+
+    this.pendingMessages.clear();
+
     console.log('[WSTunnel] All connections closed');
   }
 }
 
-// Export singleton instance
+// Singleton instance
 export const wsTunnel = new WSTunnelService();

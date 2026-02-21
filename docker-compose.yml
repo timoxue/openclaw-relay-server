@@ -29,11 +29,14 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER:-zhipu}
       - LLM_MODEL=${LLM_MODEL:-glm-4.7}
       - LLM_BASE_URL=${LLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4/}
+      - ZHIPU_API_KEY_GLM4=${ZHIPU_API_KEY_GLM4}
+      - ZHIPU_API_KEY_GLM5=${ZHIPU_API_KEY_GLM5}
       - SERVER_BASE_URL=${SERVER_BASE_URL:-http://localhost:5178}
     volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket access
-      - ~/.openclaw:/root/.openclaw  # OpenClaw storage
+      - /Users/timo/.openclaw:/root/.openclaw  # OpenClaw storage
+      - ./sandbox-data:/app/sandbox-data  # Sandbox data templates and storage
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:5178/health"]

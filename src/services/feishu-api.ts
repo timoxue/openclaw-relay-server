@@ -131,6 +131,7 @@ export class FeishuAPI {
         );
 
         if (response.data.code === 0) {
+          console.log(`[FeishuAPI] Message sent successfully to user ${userId}`);
           return true;
         } else {
           console.error(`[FeishuAPI] Send failed: code=${response.data.code}, msg=${response.data.msg}`);
@@ -183,6 +184,7 @@ export class FeishuAPI {
         );
 
         if (response.data.code === 0) {
+          console.log(`[FeishuAPI] Message sent successfully to user ${userId}`);
           return true;
         } else {
           console.error(`[FeishuAPI] Send failed: code=${response.data.code}, msg=${response.data.msg}`);

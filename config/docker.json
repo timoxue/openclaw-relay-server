@@ -4,7 +4,7 @@
   "containerPrefix": "openclaw-sandbox-",
   "gatewayPort": 18789,
   "internalGatewayPort": 18789,
-  "storagePath": "/Users/timo/openclaw/sandboxes/{userId}/storage",
+  "storagePath": "/Users/timo/LingSynapse/sandbox-data/{userId}",
   "autoRemove": true,
   "environment": {
     "OPENCLAW_MODE": "relay",

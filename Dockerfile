@@ -28,6 +28,7 @@ RUN npm install --omit=dev
 
 # 从构建阶段复制编译后的文件
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/config ./config
 
 # 创建数据库目录
