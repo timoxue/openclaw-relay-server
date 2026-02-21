@@ -205,7 +205,7 @@ export class SynapseOrchestrator {
 
     const existingStatus = await this.getContainerStatus(containerName);
     if (existingStatus.status === 'running') {
-      await sendFeishuMessage(userId, `容器 ${containerName} 已在运行`);
+      await sendFeishuMessage(userId, `容器 ${containerName} 已在运行\n\n发送 !openclaw 进入交互模式`);
       return;
     }
 
@@ -289,7 +289,7 @@ export class SynapseOrchestrator {
       };
 
       state.lastActivity = new Date();
-      await sendFeishuMessage(userId, `容器 ${containerName} 启动成功`);
+      await sendFeishuMessage(userId, `容器 ${containerName} 启动成功\n\n发送 !openclaw 进入交互模式`);
     } catch (e) {
       console.error(`[Orchestrator] Ignite error: ${e}`);
       await sendFeishuMessage(userId, '容器启动失败，请重试');
